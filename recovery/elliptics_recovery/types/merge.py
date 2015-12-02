@@ -30,11 +30,12 @@ import os
 from itertools import groupby
 import traceback
 import threading
+from bisect import bisect
 
 from ..etime import Time
 from ..utils.misc import elliptics_create_node, RecoverStat, LookupDirect, RemoveDirect, WindowedRecovery
 from ..route import RouteList
-from ..iterator import Iterator
+from ..iterator import CopyIterator
 from ..range import IdRange
 import elliptics
 
@@ -328,14 +329,10 @@ def iterate_node(ctx, node, address, backend_id, ranges, eid, stats):
     try:
         log.debug("Running iterator on node: {0}/{1}".format(address, backend_id))
         timestamp_range = ctx.timestamp.to_etime(), Time.time_max().to_etime()
-        flags = elliptics.iterator_flags.key_range
-        if ctx.no_meta:
-            flags |= elliptics.iterator_flags.no_meta
-        else:
-            flags |= elliptics.iterator_flags.ts_range
+        flags = elliptics.iterator_flags.key_range | elliptics.iterator_flags.ts_range
         key_ranges = [IdRange(r[0], r[1]) for r in ranges]
-        result, result_len = Iterator.iterate_with_stats(node=node,
-                                                         eid=eid,
+        iterator = CopyIterator(node, eid.group_id, trace_id=ctx.trace_id)
+        result, result_len = iterator.iterate_with_stats(eid=eid,
                                                          timestamp_range=timestamp_range,
                                                          key_ranges=key_ranges,
                                                          tmp_dir=ctx.tmp_dir,
@@ -345,8 +342,7 @@ def iterate_node(ctx, node, address, backend_id, ranges, eid, stats):
                                                          batch_size=ctx.batch_size,
                                                          stats=stats,
                                                          flags=flags,
-                                                         leave_file=False,
-                                                         trace_id=ctx.trace_id)
+                                                         leave_file=False,)
         if result is None:
             return None
         log.info("Iterator {0}/{1} obtained: {2} record(s)"
@@ -686,6 +682,55 @@ class DumpRecover(object):
         return self.result
 
 
+class ServerSendRecovery(object):
+    def __init__(self, ctx, node, group):
+        self.routes = self._prepare_routes(ctx, group)
+        self.session = elliptics.Session(node)
+        self.session.exceptions_policy = elliptics.exceptions_policy.no_exceptions
+        self.session.timeout = 60
+        self.session.groups = [group]
+        self.session.trace_id = ctx.trace_id
+        self.ctx = ctx
+
+    def _prepare_routes(self, ctx, group):
+        def sort_ranges(ranges):
+            ranges = sorted(ranges, key=lambda r: r[0])
+            return reduce(lambda x, y: x + y, ranges, tuple())
+
+        group_routes = ctx.routes.filter_by_groups([group])
+        routes = []
+        if ctx.one_node:
+            if ctx.backend_id is not None:
+                ranges = group_routes.get_address_backend_ranges(ctx.address, ctx.backend_id)
+                routes = [(ctx.address, ctx.backend_id, sort_ranges(ranges))]
+            else:
+                for backend_id in group_routes.get_address_backends(ctx.address):
+                    ranges = group_routes.get_address_backend_ranges(ctx.address, backend_id)
+                    routes.append((ctx.address, backend_id, sort_ranges(ranges)))
+        else:
+            for addr, backend_id in group_routes.addresses_with_backends():
+                ranges = group_routes.get_address_backend_ranges(addr, backend_id)
+                routes.append((addr, backend_id, sort_ranges(ranges)))
+        return routes
+
+    def recover(self, keys):
+        def contains(key, ranges):
+            index = bisect(ranges, key)
+            return index % 2 == 1
+
+        for addr, backend_id, backend_ranges in self.routes:
+            key_candidates = [k for k in keys if not contains(k, backend_ranges)]
+            if key_candidates:
+                self.session.set_direct_id(addr, backend_id)
+                self._server_send(key_candidates)
+        return keys
+
+    def _server_send(self, keys):
+        iterator = self.session.server_send(keys, elliptics.iterator_flags.move, self.session.groups)
+        for result in iterator:
+            log.error("record: {}".format(result.response.status))
+
+
 def dump_process_group((ctx, group)):
     log.debug("Processing group: {0}".format(group))
     stats = ctx.stats['group_{0}'.format(group)]
@@ -702,12 +747,15 @@ def dump_process_group((ctx, group)):
                                  remotes=ctx.remotes)
     ret = True
     with open(ctx.dump_file, 'r') as dump:
+        ss_rec = ServerSendRecovery(ctx, node, group)
         # splits ids from dump file in batchs and recovers it
         for batch_id, batch in groupby(enumerate(dump), key=lambda x: x[0] / ctx.batch_size):
             recovers = []
             rs = RecoverStat()
-            for _, val in batch:
-                rec = DumpRecover(routes=ctx.routes, node=node, id=elliptics.Id(val), group=group, ctx=ctx)
+            keys = [elliptics.Id(val) for _, val in batch]
+            keys = ss_rec.recover(keys)
+            for k in keys:
+                rec = DumpRecover(routes=ctx.routes, node=node, id=k, group=group, ctx=ctx)
                 recovers.append(rec)
                 rec.run()
             for r in recovers:
