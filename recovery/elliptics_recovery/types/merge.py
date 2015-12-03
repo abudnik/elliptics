@@ -688,6 +688,7 @@ class ServerSendRecovery(object):
         self.routes = self._prepare_routes(ctx, group)
         self.session = elliptics.Session(node)
         self.session.exceptions_policy = elliptics.exceptions_policy.no_exceptions
+        self.session.set_filter(elliptics.filters.all)
         self.session.timeout = 60
         self.session.groups = [group]
         self.session.trace_id = ctx.trace_id
@@ -712,9 +713,13 @@ class ServerSendRecovery(object):
             for addr, backend_id in group_routes.addresses_with_backends():
                 ranges = group_routes.get_address_backend_ranges(addr, backend_id)
                 routes.append((addr, backend_id, sort_ranges(ranges)))
+
+        log.info("Server-send recovery: group: {0}, num addresses: {1}".format(group, len(routes)))
         return routes
 
     def recover(self, keys):
+        log.info("Server-send bucket: num keys: {0}".format(len(keys)))
+
         def contain(key, ranges):
             index = bisect(ranges, key)
             return index % 2 == 1
@@ -729,26 +734,31 @@ class ServerSendRecovery(object):
         return self._get_unrecovered_keys(responses)
 
     def _server_send(self, keys, addr, backend_id, responses):
+        log.debug("Server-send: address: {0}, backend: {1}, num keys: {2}".format(addr, backend_id, len(keys)))
+
         self.session.set_direct_id(addr, backend_id)
         iterator = self.session.server_send(keys, elliptics.iterator_flags.move, list(self.session.groups))
         for result in iterator:
             status = result.response.status
             key = result.response.key
             r = (key, status, addr, backend_id)
+            log.debug("Server-send result: key: {0}, status: {1}".format(str(key), status))
             responses[str(key)].append(r)
 
     def _remove_bad_keys(self, responses):
         bad_keys = []
         for val in responses.itervalues():
             bad_keys.extend([r for r in val if self._check_bad_key(r)])
+
         results = []
         for k in bad_keys:
             key, _, addr, backend_id = k
             self.session.set_direct_id(addr, backend_id)
             result = self.session.remove(key)
             results.append(result)
-        for r in results:
-            r.wait()
+        for i, r in enumerate(results):
+            res = r.get()[0]
+            log.info("Removing key: {0}, status: ".format(bad_keys[i], res.status))
 
     def _check_bad_key(self, response):
         status = response[1]
