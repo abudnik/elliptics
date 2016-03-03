@@ -136,10 +136,8 @@ class KeyRecover(object):
                 size = min(self.total_size - self.recovered_size, self.ctx.chunk_size)
             # do not check checksum for all but the first chunk
             if self.recovered_size != 0:
-                if self.key_flags & elliptics.record_flags.chunked_csum:
-                    # if record was checksummed by chunks there is no need to disable checksum verification
-                    self.read_session.ioflags &= ~elliptics.io_flags.nocsum
-                else:
+                if self.key_flags & elliptics.record_flags.chunked_csum == 0:
+                    # if record was not checksummed by chunks there is no need to use checksum verification
                     self.read_session.ioflags |= elliptics.io_flags.nocsum
             else:
                 # first read should be at least INDEX_MAGIC_NUMBER_LENGTH bytes
@@ -256,7 +254,6 @@ class KeyRecover(object):
             if self.recovered_size == 0:
                 self.write_session.user_flags = results[-1].user_flags
                 self.write_session.timestamp = results[-1].timestamp
-                self.read_session.ioflags |= elliptics.io_flags.nocsum
                 self.read_session.groups = [results[-1].group_id]
                 self.key_flags = results[-1].record_flags
                 if self.total_size != results[-1].total_size:
