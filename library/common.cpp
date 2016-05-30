@@ -6,6 +6,9 @@ int dnet_get_backend_ids(const dnet_backend_info_manager *backends, size_t **bac
 		return -EINVAL;
 
 	auto config_backends = backends->get_all_backends();
+	if (config_backends.empty())
+		return -ENOENT;
+
 	*num_backend_ids = config_backends.size();
 	*backend_ids = reinterpret_cast<size_t *>(malloc(*num_backend_ids * sizeof(size_t)));
 	if (!*backend_ids)
