@@ -1258,7 +1258,7 @@ int dnet_server_io_init(struct dnet_node *n)
 	size_t *backend_ids, num_backend_ids;
 	size_t backends_count;
 
-        err = dnet_get_backend_ids(n->config_data->backends, &backend_ids, &num_backend_ids);
+	err = dnet_get_backend_ids(n->config_data->backends, &backend_ids, &num_backend_ids);
 	if (err) {
 		goto err_out_exit;
 	}

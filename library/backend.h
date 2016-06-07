@@ -151,8 +151,7 @@ public:
 	 */
 	void backend_fill_status(struct dnet_node *node, struct dnet_backend_status *status, size_t backend_id) const;
 
-	std::vector<std::shared_ptr<dnet_backend_info> > get_all_backends() const
-	{
+	std::vector<std::shared_ptr<dnet_backend_info> > get_all_backends() const {
 		std::vector<std::shared_ptr<dnet_backend_info> > result;
 		std::lock_guard<std::mutex> guard(backends_mutex);
 		for (auto it : backends) {
